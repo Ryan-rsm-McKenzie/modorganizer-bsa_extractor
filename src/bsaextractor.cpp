@@ -5,7 +5,6 @@
 #include <versioninfo.h>
 #include <imodinterface.h>
 #include <questionboxmemory.h>
-#include <bsaarchive.h>
 #include <report.h>
 
 #include <QDir>
@@ -17,9 +16,62 @@
 #include <functional>
 
 #include <boost/bind.hpp>
+#include <binary_io/binary_io.hpp>
+#include <bsa/bsa.hpp>
 
 using namespace MOBase;
 namespace bindph = std::placeholders;
+
+
+namespace
+{
+    binary_io::any_ostream openFile(const std::filesystem::path& path)
+    {
+        std::filesystem::create_directories(path.parent_path());
+        return binary_io::any_ostream(std::in_place_type<binary_io::file_ostream>, path);
+    }
+
+    void unpackTES3(
+        const std::filesystem::path& input,
+        const std::filesystem::path& output)
+    {
+        bsa::tes3::archive bsa;
+        bsa.read(input);
+
+        for (const auto& [key, file] : bsa) {
+            auto out = openFile(output / key.name());
+            file.write(out);
+        }
+    }
+
+    void unpackTES4(
+        const std::filesystem::path& input,
+        const std::filesystem::path& output)
+    {
+        bsa::tes4::archive bsa;
+        const auto format = bsa.read(input);
+
+        for (auto& dir : bsa) {
+            for (auto& file : dir.second) {
+                auto out = openFile(output / dir.first.name() / file.first.name());
+                file.second.write(out, format);
+            }
+        }
+    }
+
+    void unpackFO4(
+        const std::filesystem::path& input,
+        const std::filesystem::path& output)
+    {
+        bsa::fo4::archive ba2;
+        const auto format = ba2.read(input);
+
+        for (auto& [key, file] : ba2) {
+            auto out = openFile(output / key.name());
+            file.write(out, format);
+        }
+    }
+}
 
 
 BsaExtractor::BsaExtractor()
@@ -104,27 +156,32 @@ void BsaExtractor::modInstalledHandler(IModInterface *mod)
                        tr("Do you wish to remove BSAs after extraction completed?\n"),
                        QDialogButtonBox::Yes | QDialogButtonBox::No, QDialogButtonBox::No) == QDialogButtonBox::Yes);
     foreach (QFileInfo archiveInfo, archives) {
-      BSA::Archive archive;
-      BSA::EErrorCode result = archive.read(archiveInfo.absoluteFilePath().toLocal8Bit().constData(), true);
-      if ((result != BSA::ERROR_NONE) && (result != BSA::ERROR_INVALIDHASHES)) {
-        reportError(tr("failed to read %1: %2").arg(archiveInfo.fileName()).arg(result));
+      const auto archiveQPath = archiveInfo.absoluteFilePath();
+      const auto archivePath = std::filesystem::path(
+        reinterpret_cast<const char8_t*>(archiveInfo.absoluteFilePath().toUtf8().data()));
+      const auto format = bsa::guess_file_format(archivePath);
+      if (!format) {
+        reportError(tr("file is not actually an archive: %1").arg(archiveQPath));
         return;
       }
 
-      QProgressDialog progress(nullptr);
-      progress.setMaximum(100);
-      progress.setValue(0);
-      progress.show();
-
-      archive.extractAll(mod->absolutePath().toLocal8Bit().constData(),
-                         boost::bind(&BsaExtractor::extractProgress, this, boost::ref(progress), _1, _2),
-                         false);
-
-      if (result == BSA::ERROR_INVALIDHASHES) {
-        reportError(tr("This archive contains invalid hashes. Some files may be broken."));
+      try {
+        const auto modPath = std::filesystem::path(
+          reinterpret_cast<const char8_t*>(mod->absolutePath().toUtf8().data()));
+        switch (*format) {
+        case bsa::file_format::tes3:
+            unpackTES3(archivePath, modPath);
+            break;
+        case bsa::file_format::tes4:
+            unpackTES4(archivePath, modPath);
+            break;
+        case bsa::file_format::fo4:
+            unpackFO4(archivePath, modPath);
+            break;
+        }
+      } catch(const bsa::exception& e) {
+        reportError(tr("Encountered an error while unpacking the file: %1").arg(e.what()));
       }
-
-      archive.close();
 
       if (removeBSAs) {
         if (!QFile::remove(archiveInfo.absoluteFilePath())) {

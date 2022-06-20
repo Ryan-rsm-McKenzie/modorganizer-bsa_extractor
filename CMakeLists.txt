@@ -8,3 +8,12 @@ endif()
 
 project(bsa_extractor)
 add_subdirectory(src)
+
+find_package(binary_io REQUIRED CONFIG)
+find_package(bsa REQUIRED CONFIG)
+target_link_libraries(
+	"${PROJECT_NAME}"
+	PRIVATE
+		binary_io::binary_io
+		bsa::bsa
+)
